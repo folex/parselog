@@ -1,11 +1,16 @@
 package com.example
 
+import org.slf4j.LoggerFactory
+import scala.collection.mutable
+
 object Main extends scala.App {
   db.init()
 
   import parselog._
-
-  val parsedLog = parse("filtered.log")
+  val log = LoggerFactory.getLogger("main")
+  log.info("Started")
+  val parsedLog = parse("small.log")
+  log.info(s"Finished")
   //    val data = makeHistData(parsedLog)
   //    println(data.toSeq.sortBy(_._2.success).map { case (name, time) => s"$name\t\t${time.success}" }.mkString("\n"))
 }
@@ -41,7 +46,7 @@ object parselog {
             val oldEx = lineMap(id)
             val ex = oldEx.copy(endTime = oldEx.startTime + tm.group(1).toLong)
             ex.modify()
-            ex.addLine(line)
+            ex.addLine(line, last = true)
           } else {
             val ex = lineMap(id)
             ex.addLine(line)
@@ -106,14 +111,22 @@ object db {
   case class Execution(traceId: String, startTime: Long, endTime: Long) {
     private val lc = LineTable.column
     private val ec = ExecutionTable.column
+    private var lines = mutable.ArrayBuffer.empty[String]
 
     def save() = withSQL {
       insert.into(ExecutionTable).values(traceId, startTime, endTime)
     }.update().apply()
 
-    def addLine(line: String) = withSQL {
-      insert.into(LineTable).namedValues(lc.traceId -> traceId, lc.line -> line)
-    }.update().apply()
+    def addLine(line: String, last: Boolean = false) = {
+      lines += line
+      if (last) {
+        withSQL {
+          insert into LineTable columns (lc.traceId, lc.line) values (sqls.?, sqls.?)
+        }.batch(lines.map(l => Seq(traceId, l)) : _*).apply()
+
+        lines.clear()
+      }
+    }
 
     def modify() = withSQL {
       update(ExecutionTable).set(
