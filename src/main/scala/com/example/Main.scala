@@ -15,7 +15,9 @@ object Main extends scala.App {
   import parselog._
   val log = LoggerFactory.getLogger("main")
   log.info("Started")
-  parse("filtered.log")
+//  parse("filtered.log")
+  val trees = getTreeFromDAO(Some(2))
+
   log.info(s"Finished")
   //    val data = makeHistData(parsedLog)
   //    println(data.toSeq.sortBy(_._2.success).map { case (name, time) => s"$name\t\t${time.success}" }.mkString("\n"))
@@ -97,8 +99,8 @@ object parselog {
   case class FutureNode(info: FutureInfo, nodes: List[FutureNode])
   case class FutureInfo(id: Long, startTime: Long, endTime: Long, name: String, status: String, total: Long)
 
-  def parsedToTree(fileName: String) = {
-    val executions = ExecutionTable.all(limit = Some(2))
+  def getTreeFromDAO(limit: Option[Int] = None) = {
+    val executions = ExecutionTable.all(limit = limit)
     val filledExecutions = executions.map(e => e.copy(lines = ArrayBuffer(e.getLines.map(_.line) : _*)))
     filledExecutions.map(parseExecutionToTree)
   }

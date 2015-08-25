@@ -51,8 +51,7 @@ object DAO {
     def apply(s: SyntaxProvider[Execution])(rs: WrappedResultSet): Execution = Execution(rs.get(s.traceId), rs.get(s.startTime), rs.get(s.endTime))
 
     def all(limit: Option[Int] = None): List[Execution] = withSQL {
-      val req = select.all.from(ExecutionTable as e)
-      limit.map(req.limit).getOrElse(req)
+      select.all.from(ExecutionTable as e).limit(limit.getOrElse(-1))
     }.map(wrs => apply(e)(wrs)).list().apply()
   }
 
@@ -72,11 +71,11 @@ object DAO {
   }
 
   def init() = {
-    GlobalSettings.loggingSQLAndTime = GlobalSettings.loggingSQLAndTime.copy(enabled = false, singleLineMode = true, warningEnabled = true)
+    GlobalSettings.loggingSQLAndTime = GlobalSettings.loggingSQLAndTime.copy(enabled = true, singleLineMode = true, warningEnabled = true)
 
     sql"""PRAGMA foreign_keys = on""".execute().apply()
-    sql"""drop table if exists executionLines""".execute().apply()
-    sql"""drop table if exists executions""".execute().apply()
+//    sql"""drop table if exists executionLines""".execute().apply()
+//    sql"""drop table if exists executions""".execute().apply()
     sql"""create table if not exists executions(trace_id TEXT PRIMARY KEY, start_time INTEGER, end_time INTEGER)""".execute().apply()
     sql"""create table if not exists executionLines(id INT PRIMARY KEY, trace_id STRING, line TEXT, FOREIGN KEY (trace_id) REFERENCES executions(trace_id))""".execute().apply()
   }
