@@ -1,21 +1,20 @@
 package com.example
 
-import org.slf4j.LoggerFactory
-import scala.annotation.tailrec
-import scala.collection.concurrent.TrieMap
-import scala.collection.mutable.ArrayBuffer
+import com.example.DAO._
 import com.google.re2j._
-import DAO._
+import org.slf4j.LoggerFactory
 
-import scala.util.Try
+import scala.annotation.tailrec
+import scala.collection.mutable.ArrayBuffer
 
 object Main extends scala.App {
   DAO.init()
 
   import parselog._
+
   val log = LoggerFactory.getLogger("main")
   log.info("Started")
-//  parse("filtered.log")
+  //  parse("filtered.log")
   val trees = getTreeFromDAO(Some(2))
 
   log.info(s"Finished")
@@ -61,47 +60,9 @@ object parselog {
     }
   }
 
-  case class FutureTime(success: Long = 0L, failure: Long = 0L) {
-    def +(time: FutureTime) = FutureTime(success + time.success, failure + time.failure)
-  }
-
-  //  def makeHistData(traceIdToLines: collection.Map[String, Execution]) = {
-  //    val nameToLines = traceIdToLines.toSeq.par.flatMap { case (traceId, execution) =>
-  //      if (totalRegexPattern.matches(execution.lines.last)) {
-  //        val m = totalRegexPattern.matcher(execution.lines.last)
-  //        m.find()
-  //        Some(m.group(2) -> execution.lines)
-  //      } else None
-  //    }
-  //    val nameToFutureNameToTime = nameToLines.map { case (requestName, lines) =>
-  //      requestName -> lines.map { l =>
-  //        if (futureNameRegexPattern.matches(l)) {
-  //          val m = futureNameRegexPattern.matcher(l)
-  //          m.find()
-  //          val futureName = m.group(1)
-  //          val status = m.group(2)
-  //          val total = m.group(4).toLong
-  //          Some(futureName -> (status match {
-  //            case "success" => FutureTime(success = total)
-  //            case "failure" => FutureTime(failure = total)
-  //          }))
-  //        } else None
-  //      }
-  //    }
-  //
-  //    val futureNameToTime = nameToFutureNameToTime.unzip._2.flatten.flatten
-  //    val summedFutureNameToTime = futureNameToTime.foldLeft(Map[String, FutureTime]()) { case (map, (name, time)) =>
-  //      map.updated(name, map.getOrElse(name, FutureTime()) + time)
-  //    }
-  //    summedFutureNameToTime
-  //  }
-
-  case class FutureNode(info: FutureInfo, nodes: List[FutureNode])
-  case class FutureInfo(id: Long, startTime: Long, endTime: Long, name: String, status: String, total: Long)
-
   def getTreeFromDAO(limit: Option[Int] = None) = {
     val executions = ExecutionTable.all(limit = limit)
-    val filledExecutions = executions.map(e => e.copy(lines = ArrayBuffer(e.getLines.map(_.line) : _*)))
+    val filledExecutions = executions.map(e => e.copy(lines = ArrayBuffer(e.getLines.map(_.line): _*)))
     filledExecutions.map(parseExecutionToTree)
   }
 
@@ -130,16 +91,6 @@ object parselog {
      * We always assume that remainingInfos are sorted by `(fi => (fi.startTime - fi.endTime, fi.endTime))`
      */
     def buildTree(root: FutureInfo, remainingInfos: List[FutureInfo]): List[FutureNode] = {
-//      var total: Int = 0
-//      var rem = remainingInfos
-//      var neighbors = List.empty[FutureInfo]
-//      while (total < root.total) {
-//        val neighbor = rem.maxBy(fi => (fi.total, -fi.startTime))
-//        neighbors +:= neighbor
-//        total += neighbor.total
-//        rem = rem.filter(_.startTime >= neighbor.endTime)
-//      }
-
       @tailrec
       def findNodes(rem: List[FutureInfo], total: Long = 0, neighbors: List[FutureInfo] = List.empty): List[FutureInfo] = {
         if (total < root.total) {
@@ -160,4 +111,9 @@ object parselog {
 
     FutureNode(initial, buildTree(initial, sorted))
   }
+  case class FutureTime(success: Long = 0L, failure: Long = 0L) {
+    def +(time: FutureTime) = FutureTime(success + time.success, failure + time.failure)
+  }
+  case class FutureNode(info: FutureInfo, nodes: List[FutureNode])
+  case class FutureInfo(id: Long, startTime: Long, endTime: Long, name: String, status: String, total: Long)
 }
