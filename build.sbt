@@ -15,6 +15,3 @@ libraryDependencies ++= Seq(
 
 javaOptions := Seq("-Xmx2g")
 
-// Uncomment to use Akka
-//libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.3.11"
-

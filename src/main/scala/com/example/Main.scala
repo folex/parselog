@@ -1,34 +1,37 @@
 package com.example
 
 import org.slf4j.LoggerFactory
-import scala.collection.mutable
+import scala.annotation.tailrec
+import scala.collection.concurrent.TrieMap
+import scala.collection.mutable.ArrayBuffer
+import com.google.re2j._
+import DAO._
+
+import scala.util.Try
 
 object Main extends scala.App {
-  db.init()
+  DAO.init()
 
   import parselog._
   val log = LoggerFactory.getLogger("main")
   log.info("Started")
-  val parsedLog = parse("small.log")
+  parse("filtered.log")
   log.info(s"Finished")
   //    val data = makeHistData(parsedLog)
   //    println(data.toSeq.sortBy(_._2.success).map { case (name, time) => s"$name\t\t${time.success}" }.mkString("\n"))
 }
 
 object parselog {
-
-  import com.google.re2j._
-  import db.Execution
-
   val startedRegexPattern = Pattern.compile( """.*?TRACE\[(\d+)\].*?STARTED, startTime = (\d+).*$""")
   val traceRegexPattern = Pattern.compile( """^.*?TRACE\[(\d+)\].*$""")
   val totalRegexPattern = Pattern.compile( """.*?TOTAL: (\d+) ms requestName = (\w+).*""")
-  val futureNameRegexPattern = Pattern.compile( """.*?## (.*?) DE future completed with (\w+).*?total: (\d+) ms""")
+  //1. Time offset 2. Name 3. Status 4. Id 5. Total
+  val futureNameRegexPattern = Pattern.compile( """.*? time (\d+) ms, ## (.*?) DE future completed with (\w+): \(id: (\d+)\).*?total: (\d+) ms""")
 
   def parse(fileName: String): Unit = {
     val lineMap = collection.mutable.Map[String, Execution]()
     val lines = scala.io.Source.fromFile("/Users/folex/Development/logs/" + fileName).getLines()
-    lines.foreach(line =>
+    lines.foreach { line =>
       if (startedRegexPattern.matches(line)) {
         val m = startedRegexPattern.matcher(line)
         m.find()
@@ -53,7 +56,7 @@ object parselog {
           }
         }
       }
-    )
+    }
   }
 
   case class FutureTime(success: Long = 0L, failure: Long = 0L) {
@@ -75,7 +78,7 @@ object parselog {
   //          m.find()
   //          val futureName = m.group(1)
   //          val status = m.group(2)
-  //          val total = m.group(3).toLong
+  //          val total = m.group(4).toLong
   //          Some(futureName -> (status match {
   //            case "success" => FutureTime(success = total)
   //            case "failure" => FutureTime(failure = total)
@@ -91,85 +94,68 @@ object parselog {
   //    summedFutureNameToTime
   //  }
 
-  case class FutureNode(name: String, start: Long, end: Long, nodes: List[FutureNode])
-  def parseToTree(fileName: String) = {
-    val parsed = parse(fileName)
+  case class FutureNode(info: FutureInfo, nodes: List[FutureNode])
+  case class FutureInfo(id: Long, startTime: Long, endTime: Long, name: String, status: String, total: Long)
 
+  def parsedToTree(fileName: String) = {
+    val executions = ExecutionTable.all(limit = Some(2))
+    val filledExecutions = executions.map(e => e.copy(lines = ArrayBuffer(e.getLines.map(_.line) : _*)))
+    filledExecutions.map(parseExecutionToTree)
   }
-}
 
-object db {
+  def parseExecutionToTree(execution: Execution) = {
+    val infos = execution.lines.toList.flatMap { line =>
+      if (futureNameRegexPattern.matches(line)) {
+        val m = futureNameRegexPattern.matcher(line)
+        m.find()
+        val timeOffset = m.group(1).toLong
+        val futureName = m.group(2)
+        val status = m.group(3)
+        val id = m.group(4).toLong
+        val totalTime = m.group(5).toLong
 
-  import scalikejdbc._
+        val startTime = execution.startTime + timeOffset
+        val endTime = startTime + totalTime
 
-  Class.forName("org.sqlite.JDBC")
-
-  ConnectionPool.singleton("jdbc:sqlite:parselog.db", null, null)
-
-  private implicit val session = AutoSession
-
-  case class Execution(traceId: String, startTime: Long, endTime: Long) {
-    private val lc = LineTable.column
-    private val ec = ExecutionTable.column
-    private var lines = mutable.ArrayBuffer.empty[String]
-
-    def save() = withSQL {
-      insert.into(ExecutionTable).values(traceId, startTime, endTime)
-    }.update().apply()
-
-    def addLine(line: String, last: Boolean = false) = {
-      lines += line
-      if (last) {
-        withSQL {
-          insert into LineTable columns (lc.traceId, lc.line) values (sqls.?, sqls.?)
-        }.batch(lines.map(l => Seq(traceId, l)) : _*).apply()
-
-        lines.clear()
-      }
+        Some(FutureInfo(id, startTime, endTime, futureName, status, totalTime))
+      } else None
     }
 
-    def modify() = withSQL {
-      update(ExecutionTable).set(
-        ec.startTime -> startTime,
-        ec.endTime -> endTime
-      ).where.eq(ec.traceId, traceId)
-    }.update().apply()
+    val sorted = infos.sortBy(fi => (-fi.total, fi.endTime))
+    val initial = infos.maxBy(fi => (fi.total, fi.endTime))
 
-    def getLines = LineTable.getExecutionLines(traceId)
-  }
+    /*
+     * We always assume that remainingInfos are sorted by `(fi => (fi.startTime - fi.endTime, fi.endTime))`
+     */
+    def buildTree(root: FutureInfo, remainingInfos: List[FutureInfo]): List[FutureNode] = {
+//      var total: Int = 0
+//      var rem = remainingInfos
+//      var neighbors = List.empty[FutureInfo]
+//      while (total < root.total) {
+//        val neighbor = rem.maxBy(fi => (fi.total, -fi.startTime))
+//        neighbors +:= neighbor
+//        total += neighbor.total
+//        rem = rem.filter(_.startTime >= neighbor.endTime)
+//      }
 
-  object ExecutionTable extends SQLSyntaxSupport[Execution] {
-    override val tableName = "executions"
+      @tailrec
+      def findNodes(rem: List[FutureInfo], total: Long = 0, neighbors: List[FutureInfo] = List.empty): List[FutureInfo] = {
+        if (total < root.total) {
+          val neighbor = rem.maxBy(fi => (fi.total, -fi.startTime))
+          val newRem = rem.filter(_.startTime >= neighbor.endTime)
+          findNodes(newRem, total + neighbor.total, neighbor +: neighbors)
+        } else {
+          neighbors
+        }
+      }
 
-    private val e = ExecutionTable.syntax("e")
+      val neighbors = findNodes(remainingInfos)
 
-    def apply(s: SyntaxProvider[Execution])(rs: WrappedResultSet): Execution = Execution(rs.get(s.traceId), rs.get(s.startTime), rs.get(s.endTime))
+      val remaining = remainingInfos.filterNot(fi => neighbors.exists(_.id == fi.id))
 
-    def all() = withSQL {
-      select.all.from(ExecutionTable as e)
-    }.map(wrs => apply(e)(wrs)).list().apply()
-  }
+      neighbors.map(n => FutureNode(n, buildTree(n, remaining)))
+    }
 
-
-  case class Line(id: Int, traceId: String, line: String)
-  object LineTable extends SQLSyntaxSupport[Line] {
-    override val tableName = "executionLines"
-
-    val l = syntax("l")
-    val lc = column
-
-    def apply(s: SyntaxProvider[Line])(rs: WrappedResultSet): Line = Line(rs.get(s.id), rs.get(s.traceId), rs.get(s.line))
-
-    def getExecutionLines(traceId: String) = withSQL {
-      select.from(LineTable as l).where.eq(lc.traceId, traceId)
-    }.map(wrs => apply(l)(wrs))
-  }
-
-  def init() = {
-    GlobalSettings.loggingSQLAndTime = GlobalSettings.loggingSQLAndTime.copy(enabled = false, singleLineMode = true, warningEnabled = true)
-
-    sql"""PRAGMA foreign_keys = on""".execute().apply()
-    sql"""create table if not exists executions(trace_id TEXT PRIMARY KEY, start_time INTEGER, end_time INTEGER)""".execute().apply()
-    sql"""create table if not exists executionLines(id INT PRIMARY KEY, trace_id STRING, line TEXT, FOREIGN KEY (trace_id) REFERENCES executions(trace_id))""".execute().apply()
+    FutureNode(initial, buildTree(initial, sorted))
   }
 }
