@@ -20,6 +20,8 @@ object Main extends scala.App {
     parse("small.log")
   }
   val trees = getTreeFromDAO(Some(1))
+  println(s"FLAME:\n\n\n")
+  printTreeToFlame(trees.head)
 
   log.info(s"Finished")
   //    val data = makeHistData(parsedLog)
@@ -97,7 +99,7 @@ object parselog {
      */
     def buildTree(root: FutureInfo, remainingInfos: List[FutureInfo], level: Int, parent: Int): List[FutureNode] = {
 //      if(level > 431) throw new Exception("Всё пропало")
-      Main.log.info(s"\nLevel $level parent $parent")
+//      Main.log.info(s"\nLevel $level parent $parent")
       var j = 0
       @tailrec
       def findNodes(rem: List[FutureInfo], total: Long = 0, neighbors: List[FutureInfo] = List.empty): List[FutureInfo] = {
@@ -129,8 +131,11 @@ object parselog {
     FutureNode(initial, buildTree(initial, sorted, 0, -1))
   }
 
-  def printTreeToFlame(tree: FutureNode) = {
-
+  def printTreeToFlame(tree: FutureNode, prefix: String = ""): Unit = {
+    println(s"$prefix${tree.info.name} ${tree.info.total}")
+    tree.nodes.foreach { n =>
+      printTreeToFlame(n, prefix + tree.info.name + ";")
+    }
   }
 
   case class FutureTime(success: Long = 0L, failure: Long = 0L) {
