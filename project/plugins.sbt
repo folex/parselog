@@ -9,5 +9,5 @@ resolvers ++= Seq(
   )(Resolver.ivyStylePatterns)
 )
 
-addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "0.11.2")
+addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "0.13.0")
 addSbtPlugin("com.orrsella" % "sbt-sublime" % "1.1.0")
