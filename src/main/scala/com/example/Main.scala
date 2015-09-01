@@ -1,14 +1,41 @@
 package com.example
 
+import java.io.{FileOutputStream, File}
+import java.nio.charset.Charset
+import java.nio.file.{Files, Paths}
+
 import com.example.DAO._
 import com.google.re2j._
 import org.slf4j.LoggerFactory
 
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
+import scala.util.Try
+
+import scala.sys.process._
 
 object Main extends scala.App {
-  val shouldParse = false
+  var shouldParse = false
+  var fileName: String = null
+  var limit: Option[Int] = None
+
+  if (args.length < 1) {
+    println(s"Usage: " +
+      s"\nprogramname parse filename" +
+      s"\nparses passed file and renders svg for each execution" +
+      s"\nprogramname rendersvg [limit]" +
+      s"\nrenders first limit executions to svg")
+    System.exit(1)
+  } else {
+    val command = args(0)
+    command match {
+      case "parse" =>
+        fileName = args(1)
+        shouldParse = true
+      case "rendersvg" =>
+        limit = Try(args(1).toInt).toOption
+    }
+  }
 
   DAO.init()
 
@@ -16,16 +43,46 @@ object Main extends scala.App {
 
   val log = LoggerFactory.getLogger("main")
   log.info("Started")
-  if(shouldParse) {
-    parse("small.log")
+  if (shouldParse) {
+    parse(fileName)
   }
-  val trees = getTreeFromDAO(Some(1))
-  println(s"FLAME:\n\n\n")
-  printTreeToFlame(trees.head)
+  val trees = getTreeFromDAO(limit)
+
+  val flamestacksPath = "./flamestacks/"
+  val flamestacks = new File(flamestacksPath)
+  if (!flamestacks.exists()) {
+    flamestacks.mkdir()
+  }
+
+  trees.foreach { case (traceId, tree) =>
+    val file = new File(flamestacksPath + traceId)
+    file.createNewFile()
+    val stream = new FileOutputStream(file)
+    printTreeToFlame(tree, stream)
+    stream.close()
+  }
+
+  val svgs = trees.unzip._1.map { traceId =>
+    traceId -> {
+      s"perl ./flamegraph.pl ./flamestacks/$traceId" !!
+    }
+  }
+
+  val svgsPath = "./svgs/"
+  val svgsDir = new File(svgsPath)
+  if (!svgsDir.exists()) {
+    svgsDir.mkdir()
+  }
+
+  svgs.foreach { case (traceId, svg) =>
+    val file = new File(svgsPath + traceId + ".svg")
+    file.createNewFile()
+    val stream = new FileOutputStream(file)
+    stream.write(svg.getBytes(Charset.defaultCharset()))
+    stream.close()
+  }
 
   log.info(s"Finished")
-  //    val data = makeHistData(parsedLog)
-  //    println(data.toSeq.sortBy(_._2.success).map { case (name, time) => s"$name\t\t${time.success}" }.mkString("\n"))
 }
 
 object parselog {
@@ -68,9 +125,8 @@ object parselog {
 
   def getTreeFromDAO(limit: Option[Int] = None) = {
     val executions = ExecutionTable.all(limit = limit)
-    val filledExecutions = executions.map(e => e.copy(lines = ArrayBuffer(e.getLines.map(_.line): _*)))
-    println(s"Executions are \n\t" + filledExecutions.mkString("\n\t"))
-    filledExecutions.map(parseExecutionToTree)
+    val filledExecutions = executions.map(e => e.copy(lines = ArrayBuffer(e.getLines.map(_.line): _*))).filter(_.lines.nonEmpty)
+    filledExecutions.map(fe => fe.traceId -> parseExecutionToTree(fe))
   }
 
   def parseExecutionToTree(execution: Execution) = {
@@ -98,12 +154,8 @@ object parselog {
      * We always assume that remainingInfos are sorted by `(fi => (fi.startTime - fi.endTime, fi.endTime))`
      */
     def buildTree(root: FutureInfo, remainingInfos: List[FutureInfo], level: Int, parent: Int): List[FutureNode] = {
-//      if(level > 431) throw new Exception("Всё пропало")
-//      Main.log.info(s"\nLevel $level parent $parent")
-      var j = 0
       @tailrec
       def findNodes(rem: List[FutureInfo], total: Long = 0, neighbors: List[FutureInfo] = List.empty): List[FutureInfo] = {
-        j += 1
         if (total < root.total && rem.nonEmpty) {
           val neighbor = rem.minBy(fi => (fi.startTime, -fi.total))
           val newRem = rem.filter(fi => fi.startTime >= neighbor.endTime && fi.endTime <= root.endTime && fi.id != neighbor.id)
@@ -114,28 +166,27 @@ object parselog {
       }
 
       val neighbors = findNodes(remainingInfos)
-//      println(s"Level $level parent $parent neighbors.size ${neighbors.size}")
 
       val remaining = remainingInfos.filterNot(fi => neighbors.exists(_.id == fi.id))
-//      println(s"Level $level parent $parent remaining.size ${remaining.size}")
 
       neighbors.zipWithIndex.map { case (n, ni) =>
-//        println(s"Will process neighbor $ni ${n.name} from level $level; parent $parent")
         val rems = remaining.filter(fi => fi.startTime >= n.startTime && fi.endTime <= n.endTime)
-        val res = FutureNode(n, buildTree(n, rems, level + 1, ni))
-//        println(s"Finished processing $ni ${n.name} from level $level; parent $parent\n")
-        res
+        FutureNode(n, buildTree(n, rems, level + 1, ni))
       }
     }
 
     FutureNode(initial, buildTree(initial, sorted, 0, -1))
   }
 
-  def printTreeToFlame(tree: FutureNode, prefix: String = ""): Unit = {
-    println(s"$prefix${tree.info.name} ${tree.info.total}")
-    tree.nodes.foreach { n =>
-      printTreeToFlame(n, prefix + tree.info.name + ";")
+  def printTreeToFlame(tree: FutureNode, file: FileOutputStream): Unit = {
+    def helper(node: FutureNode, prefix: String = ""): Unit = {
+      file.write((s"$prefix${node.info.name} ${node.info.total}\n").getBytes(Charset.defaultCharset()))
+      node.nodes.foreach { n =>
+        helper(n, prefix + node.info.name + ";")
+      }
     }
+
+    helper(tree)
   }
 
   case class FutureTime(success: Long = 0L, failure: Long = 0L) {
