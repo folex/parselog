@@ -94,7 +94,7 @@ object parselog {
 
   def parse(fileName: String): Unit = {
     val lineMap = collection.mutable.Map[String, Execution]()
-    val lines = scala.io.Source.fromFile("/Users/folex/Development/logs/" + fileName).getLines()
+    val lines = scala.io.Source.fromFile(fileName).getLines()
     lines.foreach { line =>
       if (startedRegexPattern.matches(line)) {
         val m = startedRegexPattern.matcher(line)
