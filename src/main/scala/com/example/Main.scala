@@ -3,6 +3,8 @@ package com.example
 import java.io.{FileOutputStream, File}
 import java.nio.charset.Charset
 import java.nio.file.{Files, Paths}
+import java.text.SimpleDateFormat
+import java.util.{Calendar, Date}
 
 import com.example.DAO._
 import com.google.re2j._
@@ -15,80 +17,96 @@ import scala.util.Try
 import scala.sys.process._
 
 object Main extends scala.App {
-  var shouldParse = false
-  var fileName: String = null
-  var limit: Option[Int] = None
+
+  import parselog._
+
+  val log = LoggerFactory.getLogger("main")
+  log.info("Started")
 
   if (args.length < 1) {
     println(s"Usage: " +
       s"\nprogramname parse filename" +
       s"\nparses passed file and renders svg for each execution" +
       s"\nprogramname rendersvg [limit]" +
-      s"\nrenders first limit executions to svg")
+      s"\nrenders first limit executions to svg" +
+      s"\nprogramname calctimes filename [outdir]" +
+      s"\nparses passed file and renders csv for each execution")
     System.exit(1)
   } else {
     val command = args(0)
     command match {
       case "parse" =>
-        fileName = args(1)
-        shouldParse = true
+        DAO.init(true)
+        val fileName = args(1)
+        parseAndRender(Some(fileName), None)
       case "rendersvg" =>
-        limit = Try(args(1).toInt).toOption
+        DAO.init(false)
+        val limit = Try(args(1).toInt).toOption
+        parseAndRender(None, limit)
+      case "calctimes" =>
+        val fileName = args(1)
+        val outdir = Try(args(2)).toOption.getOrElse("./csvs/")
+        calcTimesAndRender(fileName, outdir)
     }
   }
 
-  DAO.init()
+  def parseAndRender(fileName: Option[String], limit: Option[Int]) = {
+    if (fileName.isDefined) {
+      parse(fileName.get)
+    }
+    val trees = getTreeFromDAO(limit)
 
-  import parselog._
+    val flamestacksPath = "./flamestacks/"
+    val flamestacks = new File(flamestacksPath)
+    if (!flamestacks.exists()) {
+      flamestacks.mkdir()
+    }
 
-  val log = LoggerFactory.getLogger("main")
-  log.info("Started")
-  if (shouldParse) {
-    parse(fileName)
-  }
-  val trees = getTreeFromDAO(limit)
+    trees.foreach { case (traceId, tree) =>
+      val file = new File(flamestacksPath + traceId)
+      file.createNewFile()
+      val stream = new FileOutputStream(file)
+      printTreeToFlame(tree, stream)
+      stream.close()
+    }
 
-  val flamestacksPath = "./flamestacks/"
-  val flamestacks = new File(flamestacksPath)
-  if (!flamestacks.exists()) {
-    flamestacks.mkdir()
-  }
+    val svgs = trees.unzip._1.map { traceId =>
+      traceId -> {
+        s"perl ./flamegraph.pl ./flamestacks/$traceId" !!
+      }
+    }
 
-  trees.foreach { case (traceId, tree) =>
-    val file = new File(flamestacksPath + traceId)
-    file.createNewFile()
-    val stream = new FileOutputStream(file)
-    printTreeToFlame(tree, stream)
-    stream.close()
-  }
+    val svgsPath = "./svgs/"
+    val svgsDir = new File(svgsPath)
+    if (!svgsDir.exists()) {
+      svgsDir.mkdir()
+    }
 
-  val svgs = trees.unzip._1.map { traceId =>
-    traceId -> {
-      s"perl ./flamegraph.pl ./flamestacks/$traceId" !!
+    svgs.foreach { case (traceId, svg) =>
+      val file = new File(svgsPath + traceId + ".svg")
+      file.createNewFile()
+      val stream = new FileOutputStream(file)
+      stream.write(svg.getBytes(Charset.defaultCharset()))
+      stream.close()
     }
   }
 
-  val svgsPath = "./svgs/"
-  val svgsDir = new File(svgsPath)
-  if (!svgsDir.exists()) {
-    svgsDir.mkdir()
-  }
-
-  svgs.foreach { case (traceId, svg) =>
-    val file = new File(svgsPath + traceId + ".svg")
-    file.createNewFile()
-    val stream = new FileOutputStream(file)
-    stream.write(svg.getBytes(Charset.defaultCharset()))
-    stream.close()
+  def calcTimesAndRender(fileName: String, csvsPath: String) = {
+    val times = calculateExecutionTimes(fileName)
+    renderTimesToCsv(csvsPath, times)
   }
 
   log.info(s"Finished")
 }
 
 object parselog {
+  import Main.log
+
   val startedRegexPattern = Pattern.compile( """.*?TRACE\[(\d+)\].*?STARTED, startTime = (\d+).*$""")
   val traceRegexPattern = Pattern.compile( """^.*?TRACE\[(\d+)\].*$""")
   val totalRegexPattern = Pattern.compile( """.*?TOTAL: (\d+) ms requestName = (\w+).*""")
+  //1. Year 2. Month 3. Day 4. Hour 5. Min 6. Sec 7. Total 8. Request name
+  val totalWithTimeRegexPattern = Pattern.compile(""".*?\[([\d]{4})([\d]{2})([\d]{2})-([\d]{2}):([\d]{2}):([\d]{2})\.[\d]{3}\].*?TOTAL: (\d+) ms.*?requestName = (\w+).*""")
   //1. Time offset 2. Name 3. Status 4. Id 5. Total
   val futureNameRegexPattern = Pattern.compile( """.*? time (\d+) ms, ## (.*?) DE future completed with (\w+): \(id: (\d+)\).*?total: (\d+) ms""")
 
@@ -120,6 +138,101 @@ object parselog {
           }
         }
       }
+    }
+  }
+
+  case class Request(name: String, start: Long, end: Long = -1, total: Long = -1)
+  // 1. Year 2. Month 3. Day 4. Hour 5. Min 6. Sec 7. Millis 8. Connection Id 9. REQ or RES 10. Request name
+  val requestPattern = Pattern.compile( """\S{3}\s\[(\d{4})(\d{2})(\d{2})-(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s\S+\s\(\S*\):\s(\S+)\s(\S+):\s(\w+).*""")
+
+  def calculateExecutionTimes(fileName: String): Map[String, Seq[(Long, Long)]] = {
+    val lines = scala.io.Source.fromFile(fileName).getLines()
+    val cal = Calendar.getInstance()
+
+    val requests = lines.foldLeft(Map.empty[String, Seq[Request]]) { case (map, line) =>
+      val m = requestPattern.matcher(line)
+      if (!m.find()) {
+        log.error(s"Can't match $line")
+        map
+      } else {
+        val year = m.group(1).toInt
+        val month = m.group(2).toInt - 1 //0 based
+        val day = m.group(3).toInt
+        val hour = m.group(4).toInt
+        val min = m.group(5).toInt
+        val sec = m.group(6).toInt
+        val millis = m.group(7).toInt
+        val connectionId = m.group(8)
+        val lineType = m.group(9)
+        val requestName = m.group(10)
+
+        cal.set(year, month, day, hour, min, sec)
+        cal.set(Calendar.MILLISECOND, millis)
+        val unixTime = cal.getTimeInMillis
+
+        if (lineType == "REQ") {
+          if (requestName == "Ping") map
+          else {
+            val request = Request(requestName, unixTime)
+            map.updated(connectionId, request +: map.getOrElse(connectionId, Seq.empty))
+          }
+        } else if (lineType == "RES") {
+          val rName = {
+            if (requestName == "Pong") ""
+            else if (requestName.endsWith("Response")) {
+              requestName.dropRight(8) + "Request"
+            } else {
+              log.info(s"Strange requestName $requestName)")
+              ""
+            }
+          }
+          if (rName.nonEmpty) {
+            val requests = map.get(connectionId)
+            val (before, withAndAfter) = requests.getOrElse(Seq.empty).span(r => !(r.end == -1 && r.name == rName))
+            val request = withAndAfter.headOption
+            request.fold {
+              log.info(s"Unable to find REQ for $rName for $connectionId")
+              map
+            } { r =>
+              val filledReq = r.copy(end = unixTime, total = unixTime - r.start)
+              if (filledReq.total < 0) {
+                log.info(s"Got negative total for $connectionId $rName. Was $r became $filledReq")
+              }
+              val reqs = (before :+ filledReq) ++ withAndAfter.drop(1)
+              map.updated(connectionId, reqs)
+            }
+          } else map
+        } else {
+          throw new RuntimeException(s"Incorrect line type on line $line")
+        }
+
+      }
+    }
+    val res = requests.values.flatten.filter(_.end > 0).groupBy(_.name).mapValues(_.toSeq.sortBy(_.end).map(r => r.end/1000 -> r.total))
+    res
+  }
+
+  def renderTimesToCsv(csvsPath: String, times: Map[String, Seq[(Long, Long)]]) = {
+    val csvsDir = new File(csvsPath)
+    val path = csvsPath + new SimpleDateFormat("YMMdd_HHmm").format(Calendar.getInstance.getTime)
+    val subdir = new File(path)
+    if (!csvsDir.exists()) {
+      csvsDir.mkdir()
+    }
+    if (!subdir.exists()) {
+      subdir.mkdir()
+    }
+
+    times.foreach { case (name, series) =>
+      val p = path + "/" + name.toLowerCase + ".csv"
+      log.info(s"Creating $p")
+      val file = new File(p)
+      file.createNewFile()
+      val stream = new FileOutputStream(file)
+      series.foreach { case (time, total) =>
+        stream.write(s"$time,$total\n".getBytes(Charset.defaultCharset()))
+      }
+      stream.close()
     }
   }
 

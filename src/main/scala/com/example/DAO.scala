@@ -13,11 +13,11 @@ object DAO {
 
   private implicit val session = AutoSession
 
-  def init() = {
+  def init(shouldParse: Boolean) = {
     GlobalSettings.loggingSQLAndTime = GlobalSettings.loggingSQLAndTime.copy(enabled = true, singleLineMode = true, warningEnabled = true)
 
     sql"""PRAGMA foreign_keys = on""".execute().apply()
-    if (Main.shouldParse) {
+    if (shouldParse) {
       sql"""drop table if exists executionLines""".execute().apply()
       sql"""drop table if exists executions""".execute().apply()
     }
