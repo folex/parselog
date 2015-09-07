@@ -11,10 +11,12 @@ import com.google.re2j._
 import org.slf4j.LoggerFactory
 
 import scala.annotation.tailrec
+import scala.collection.immutable.Iterable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Try
 
 import scala.sys.process._
+import scala.concurrent.duration._
 
 object Main extends scala.App {
 
@@ -29,8 +31,9 @@ object Main extends scala.App {
       s"\nparses passed file and renders svg for each execution" +
       s"\nprogramname rendersvg [limit]" +
       s"\nrenders first limit executions to svg" +
-      s"\nprogramname calctimes filename [outdir]" +
-      s"\nparses passed file and renders csv for each execution")
+      s"\nprogramname calctimes filename [outdir] [days]" +
+      s"\nparses passed file and renders csv for each execution" +
+      s"\nif days specified, aggregates data by that number of days using average")
     System.exit(1)
   } else {
     val command = args(0)
@@ -46,7 +49,8 @@ object Main extends scala.App {
       case "calctimes" =>
         val fileName = args(1)
         val outdir = Try(args(2)).toOption.getOrElse("./csvs/")
-        calcTimesAndRender(fileName, outdir)
+        val interval = Try(args(3)).toOption.map(_.toLong.days)
+        calcTimesAndRender(fileName, outdir, interval)
     }
   }
 
@@ -91,9 +95,10 @@ object Main extends scala.App {
     }
   }
 
-  def calcTimesAndRender(fileName: String, csvsPath: String) = {
+  def calcTimesAndRender(fileName: String, csvsPath: String, interval: Option[FiniteDuration]) = {
     val times = calculateExecutionTimes(fileName)
-    renderTimesToCsv(csvsPath, times)
+    val aggregatedOrNot = interval.fold(times)(averageByInterval(times, _))
+    renderTimesToCsv(csvsPath, aggregatedOrNot)
   }
 
   log.info(s"Finished")
@@ -145,7 +150,7 @@ object parselog {
   // 1. Year 2. Month 3. Day 4. Hour 5. Min 6. Sec 7. Millis 8. Connection Id 9. REQ or RES 10. Request name
   val requestPattern = Pattern.compile( """\S{3}\s\[(\d{4})(\d{2})(\d{2})-(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s\S+\s\(\S*\):\s(\S+)\s(\S+):\s(\w+).*""")
 
-  def calculateExecutionTimes(fileName: String): Map[String, Seq[(Long, Long)]] = {
+  def calculateExecutionTimes(fileName: String): Seq[Request] = {
     val lines = scala.io.Source.fromFile(fileName).getLines()
     val cal = Calendar.getInstance()
 
@@ -208,11 +213,25 @@ object parselog {
 
       }
     }
-    val res = requests.values.flatten.filter(_.end > 0).groupBy(_.name).mapValues(_.toSeq.sortBy(_.end).map(r => r.end/1000 -> r.total))
-    res
+    requests.values.flatten.filter(_.end > 0).toSeq
   }
 
-  def renderTimesToCsv(csvsPath: String, times: Map[String, Seq[(Long, Long)]]) = {
+  def averageByInterval(series: Seq[Request], interval: FiniteDuration = 7.days): Seq[Request] = {
+    val sorted = series.sortBy(_.end)
+    val start = series.minBy(_.start).start
+    val grouped = sorted.groupBy(r => (r.end - start)/interval.toMillis).values
+    grouped.flatMap { rs =>
+      val start = rs.minBy(_.start).start
+      val end = rs.maxBy(_.end).end
+      val time = start + (end - start)/2
+      rs.groupBy(_.name).map { case (name, grs) =>
+        val averageTotal = math.ceil(grs.map(_.total).sum.toDouble / grs.size).toLong
+        Request(name, -1L, time, averageTotal)
+      }
+    }.toSeq
+  }
+
+  def renderTimesToCsv(csvsPath: String, times: Seq[Request]) = {
     val csvsDir = new File(csvsPath)
     val path = csvsPath + new SimpleDateFormat("YMMdd_HHmm").format(Calendar.getInstance.getTime)
     val subdir = new File(path)
@@ -223,14 +242,14 @@ object parselog {
       subdir.mkdir()
     }
 
-    times.foreach { case (name, series) =>
+    times.groupBy(_.name).foreach { case (name, series) =>
       val p = path + "/" + name.toLowerCase + ".csv"
       log.info(s"Creating $p")
       val file = new File(p)
       file.createNewFile()
       val stream = new FileOutputStream(file)
-      series.foreach { case (time, total) =>
-        stream.write(s"$time,$total\n".getBytes(Charset.defaultCharset()))
+      series.sortBy(_.end).foreach { case Request(_, _, endTime, total) =>
+        stream.write(s"${endTime/1000},$total\n".getBytes(Charset.defaultCharset()))
       }
       stream.close()
     }
@@ -308,3 +327,22 @@ object parselog {
   case class FutureNode(info: FutureInfo, nodes: List[FutureNode])
   case class FutureInfo(id: Long, startTime: Long, endTime: Long, name: String, status: String, total: Long, timeOffset: Long)
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
